@@ -1,3 +1,4 @@
+# app.py
 import os, pathlib, sys
 import streamlit as st
 import plotly.graph_objects as go
@@ -7,7 +8,7 @@ BASE = pathlib.Path(__file__).resolve().parent
 sys.path.append(str(BASE))
 
 from core.data_loader import DataLoader
-from core.strategy import compute_signal, DEFAULTS
+from core.strategy import compute_signal
 from core.llm import build_rationale
 
 def _fmt_val(x: float) -> str:
@@ -44,18 +45,18 @@ def _infer_zones_for_text(sig: dict) -> tuple[str, str]:
         tp1 = float(sig.get("tp1", entry*1.01))
         step = max(abs(tp1 - entry) * 0.3, 0.5)
         short_lo, short_hi = ups[0], ups[0] + step
-        if short_lo > short_hi:
-            short_lo, short_hi = short_hi, short_lo
+        if short_lo > short_hi: short_lo, short_hi = short_hi, short_lo
     else:
         uz = float(sig.get("upper_zone", entry*1.02))
         km = float(sig.get("key_mark", entry))
         short_lo, short_hi = min(km, uz), max(km, uz)
     return _fmt_range(wait_lo, wait_hi), _fmt_range(short_lo, short_hi)
 
-st.set_page_config(page_title="AI Trading — Calibrated", layout="wide")
-st.title("AI Trading — Calibrated")
-st.caption("Данные: Polygon → Yahoo → CSV. Стратегия: кастом. Текст — офлайн, без раскрытия методики.")
+st.set_page_config(page_title="AI Trading — Clean", layout="wide")
+st.title("AI Trading — Clean")
+st.caption("Данные: Polygon → Yahoo → CSV. Без калибровки, без скользящих средних. Текст — офлайн, без раскрытия методики.")
 
+# Тикеры и горизонт
 default_tickers = os.getenv("DEFAULT_TICKERS", "QQQ,AAPL,MSFT,NVDA")
 tickers = st.text_input("Tickers (через запятые)", value=default_tickers).upper()
 symbols = [t.strip() for t in tickers.split(",") if t.strip()]
@@ -64,35 +65,13 @@ h_map = {"Краткосрок":"short","Среднесрок":"swing","Долг
 horizon_ui = st.selectbox("Горизонт", list(h_map.keys()), index=1)
 horizon = h_map[horizon_ui]
 
-detail = st.selectbox("Степень детализации описания", ["Коротко", "Стандарт", "Подробно"], index=1)
+detail = st.selectbox("Степень детализации описания", ["Коротко", "Стандарт", "Подробно"], index=0)
 
 try:
     idx = symbols.index("QQQ")
 except ValueError:
     idx = 0 if symbols else 0
 symbol = st.selectbox("Тикер", symbols if symbols else ["QQQ"], index=idx)
-
-with st.sidebar:
-    st.subheader("Калибровка под твой стиль")
-    ema_fast = st.number_input("EMA fast", 5, 60, DEFAULTS["ema_fast"])  # type: ignore[arg-type]
-    ema_mid  = st.number_input("EMA mid", 20, 120, DEFAULTS["ema_mid"])   # type: ignore[arg-type]
-    ema_slow = st.number_input("EMA slow", 100, 400, DEFAULTS["ema_slow"])# type: ignore[arg-type]
-    rsi_hi   = st.slider("Граница перегретости", 55, 85, int(DEFAULTS["rsi_hi"])) # type: ignore[arg-type]
-    rsi_lo   = st.slider("Граница перепроданности", 15, 50, int(DEFAULTS["rsi_lo"])) # type: ignore[arg-type]
-    weak_tail_ratio = st.slider("Тень сверху ≥ доли диапазона", 0.3, 0.9, float(DEFAULTS["weak_tail_ratio"])) # type: ignore[arg-type]
-    weak_body_ratio = st.slider("Тело свечи ≤ доли диапазона", 0.1, 0.7, float(DEFAULTS["weak_body_ratio"])) # type: ignore[arg-type]
-    macd_short = st.slider("MACD bars (short)", 1, 5, int(DEFAULTS["macd_bars_short"])) # type: ignore[arg-type]
-    macd_swing = st.slider("MACD bars (swing)", 1, 6, int(DEFAULTS["macd_bars_swing"])) # type: ignore[arg-type]
-    macd_pos   = st.slider("MACD bars (position)", 1, 8, int(DEFAULTS["macd_bars_pos"])) # type: ignore[arg-type]
-    show_orients = st.checkbox("Показывать ориентиры ↑/↓ на графике", value=True)
-    my_override = st.text_area("Моё резюме (перепишет авто-текст)", height=140, placeholder="Коротко: где слабость, что делать, альтернативный сценарий...")
-
-params = dict(
-    ema_fast=int(ema_fast), ema_mid=int(ema_mid), ema_slow=int(ema_slow),
-    rsi_hi=int(rsi_hi), rsi_lo=int(rsi_lo),
-    weak_tail_ratio=float(weak_tail_ratio), weak_body_ratio=float(weak_body_ratio),
-    macd_bars_short=int(macd_short), macd_bars_swing=int(macd_swing), macd_bars_pos=int(macd_pos),
-)
 
 loader = DataLoader()
 
@@ -103,7 +82,7 @@ with colA:
             fetched = loader.history(symbol, period="6mo", interval="1d")
             st.session_state["source"] = fetched.source
             st.session_state["df"] = fetched.df
-            sig = compute_signal(fetched.df, symbol, horizon, params=params)
+            sig = compute_signal(fetched.df, symbol, horizon, params=None)  # фикс. параметры
             sig["source"] = fetched.source
             wait_zone, short_zone = _infer_zones_for_text(sig)
             sig["wait_zone"] = wait_zone; sig["short_zone"] = short_zone
@@ -123,20 +102,27 @@ with colB:
 
         st.write("")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Entry", _fmt_val(sig["entry"])); m2.metric("TP1", _fmt_val(sig["tp1"])); m3.metric("TP2", _fmt_val(sig["tp2"])); m4.metric("SL", _fmt_val(sig["sl"]))
+        m1.metric("Entry", _fmt_val(sig["entry"]))
+        m2.metric("TP1", _fmt_val(sig["tp1"]))
+        m3.metric("TP2", _fmt_val(sig["tp2"]))
+        m4.metric("SL", _fmt_val(sig["sl"]))
+
         d1, d2, d3 = st.columns(3)
-        d1.metric("Ключевая отметка", _fmt_val(sig["key_mark"])); d2.metric("Верхняя зона", _fmt_val(sig["upper_zone"])); d3.metric("Нижняя зона", _fmt_val(sig["lower_zone"]))
+        d1.metric("Ключевая отметка", _fmt_val(sig["key_mark"]))
+        d2.metric("Верхняя зона", _fmt_val(sig["upper_zone"]))
+        d3.metric("Нижняя зона", _fmt_val(sig["lower_zone"]))
         st.metric("Confidence", f"{sig['confidence']:.2f}")
 
-        ups = dns = []
-        if show_orients:
-            ups, dns = _neutral_orients(sig)
+        # График + нейтральные ориентиры ↑/↓
+        ups, dns = _neutral_orients(sig)
 
-        fig = go.Figure([go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"])])
+        fig = go.Figure([go.Candlestick(
+            x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"]
+        )])
 
         plan_lines = {"Entry": sig["entry"], "TP1": sig["tp1"], "TP2": sig["tp2"], "SL": sig["sl"],
                       "Ключевая отметка": sig["key_mark"], "Верхняя зона": sig["upper_zone"], "Нижняя зона": sig["lower_zone"]}
-        colors = {"Entry":"%s"%("#2563eb"),"TP1":"#16a34a","TP2":"#16a34a","SL":"#dc2626",
+        colors = {"Entry":"#2563eb","TP1":"#16a34a","TP2":"#16a34a","SL":"#dc2626",
                   "Ключевая отметка":"#6b7280","Верхняя зона":"#f59e0b","Нижняя зона":"#10b981",
                   "Ориентир ↑1":"#a78bfa","Ориентир ↑2":"#a78bfa","Ориентир ↓1":"#f472b6","Ориентир ↓2":"#f472b6"}
 
@@ -145,11 +131,18 @@ with colB:
             fig.add_hline(y=y, line_width=1, line_dash="dot", line_color=colors.get(label, "#999"),
                           annotation_text=label, annotation_position="top left")
 
-        if show_orients:
-            if len(ups) >= 1: fig.add_hline(y=ups[0], line_width=1, line_dash="dot", line_color=colors["Ориентир ↑1"], annotation_text="Ориентир ↑1", annotation_position="top left")
-            if len(ups) >= 2: fig.add_hline(y=ups[1], line_width=1, line_dash="dot", line_color=colors["Ориентир ↑2"], annotation_text="Ориентир ↑2", annotation_position="top left")
-            if len(dns) >= 1: fig.add_hline(y=dns[0], line_width=1, line_dash="dot", line_color=colors["Ориентир ↓1"], annotation_text="Ориентир ↓1", annotation_position="top left")
-            if len(dns) >= 2: fig.add_hline(y=dns[1], line_width=1, line_dash="dot", line_color=colors["Ориентир ↓2"], annotation_text="Ориентир ↓2", annotation_position="top left")
+        if len(ups) >= 1:
+            fig.add_hline(y=ups[0], line_width=1, line_dash="dot", line_color=colors["Ориентир ↑1"],
+                          annotation_text="Ориентир ↑1", annotation_position="top left")
+        if len(ups) >= 2:
+            fig.add_hline(y=ups[1], line_width=1, line_dash="dot", line_color=colors["Ориентир ↑2"],
+                          annotation_text="Ориентир ↑2", annotation_position="top left")
+        if len(dns) >= 1:
+            fig.add_hline(y=dns[0], line_width=1, line_dash="dot", line_color=colors["Ориентир ↓1"],
+                          annotation_text="Ориентир ↓1", annotation_position="top left")
+        if len(dns) >= 2:
+            fig.add_hline(y=dns[1], line_width=1, line_dash="dot", line_color=colors["Ориентир ↓2"],
+                          annotation_text="Ориентир ↓2", annotation_position="top left")
 
         try:
             x0 = df["Date"].iloc[-min(len(df), 40)]; x1 = df["Date"].iloc[-1]
@@ -163,17 +156,18 @@ with colB:
         fig.update_layout(margin=dict(l=10,r=10,t=30,b=10), height=460, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # текст
+        # Текст
         if detail == "Коротко":
             text = (f"**🧠 {sig['symbol']} — {horizon_ui}**\n"
                     f"Цена упёрлась в зону, где ранее появлялась слабость; импульс выдыхается.\n\n"
                     f"**✅ Рекомендация:** {sig['action']}\n"
                     f"- Ждём отката к {sig['wait_zone']} для поиска лонга.\n"
                     f"- Агрессивный шорт допустим от {sig['short_zone']}, цели: {_fmt_val(sig['tp1'])}/{_fmt_val(sig['tp2'])}, стоп — > {_fmt_val(sig['sl'])}.\n\n"
-                    f"💬 Опытным: можно работать от отката; остальным — пауза до подтверждения.")
+                    f"💬 Опытным: можно работать от отката; остальным — пауза.")
             st.markdown(text)
         else:
             text = build_rationale(sig["symbol"], horizon_ui, sig, detail=detail)
             st.write(text)
     else:
         st.info("Нажмите «Сгенерировать сигнал». Если Polygon/Yahoo недоступны — возьмём demo CSV.")
+
