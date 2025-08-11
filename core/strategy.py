@@ -1,3 +1,4 @@
+# core/strategy.py
 from __future__ import annotations
 import pandas as pd, numpy as np
 from typing import Literal, TypedDict, Optional, Dict
@@ -6,11 +7,11 @@ Horizon = Literal["short","swing","position"]
 Action  = Literal["BUY","SHORT","WAIT"]
 
 DEFAULTS = {
-    "ema_fast": 20, "ema_mid": 50, "ema_slow": 200,
     "rsi_hi": 68, "rsi_lo": 32,
     "macd_bars_short": 2, "macd_bars_swing": 3, "macd_bars_pos": 3,
-    "weak_tail_ratio": 0.6,
-    "weak_body_ratio": 0.35,
+    "weak_tail_ratio": 0.6,   # верхняя тень/диапазон ≥
+    "weak_body_ratio": 0.35,  # тело/диапазон ≤
+    # ATR-профиль целей/стопов
     "short_tp1":0.6, "short_tp2":1.2, "short_sl":0.9,
     "swing_tp1":0.8, "swing_tp2":1.6, "swing_sl":1.0,
     "pos_tp1":1.0,   "pos_tp2":2.2,   "pos_sl":1.4,
@@ -24,9 +25,6 @@ class Signal(TypedDict):
     entry: float; tp1: float; tp2: float; sl: float
     key_mark: float; upper_zone: float; lower_zone: float
     pivot_P: float; R1: float; R2: float; R3: float; S1: float; S2: float; S3: float
-
-def _ema(s: pd.Series, span: int) -> pd.Series:
-    return s.ewm(span=span, adjust=False).mean()
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     d = close.diff()
@@ -45,7 +43,8 @@ def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.rolling(w).mean().fillna(tr.ewm(span=w, adjust=False).mean())
 
 def _macd_hist(close: pd.Series, fast=12, slow=26, sig=9) -> pd.Series:
-    ema_fast = _ema(close, fast); ema_slow = _ema(close, slow)
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
     macd = ema_fast - ema_slow
     signal = macd.ewm(span=sig, adjust=False).mean()
     return macd - signal
@@ -54,7 +53,7 @@ def _consecutive_sign(series: pd.Series) -> int:
     s = series.dropna()
     if s.empty: return 0
     last = s.iloc[-1]
-    if abs(last) == 0: return 0
+    if last == 0: return 0
     sign = 1 if last > 0 else -1
     cnt = 0
     for x in reversed(s.values):
@@ -73,12 +72,9 @@ def _landmarks(df: pd.DataFrame) -> pd.DataFrame:
 
 def _floor_pivots(H: float, L: float, C: float):
     P  = (H + L + C) / 3.0
-    R1 = 2*P - L
-    S1 = 2*P - H
-    R2 = P + (H - L)
-    S2 = P - (H - L)
-    R3 = H + 2*(P - L)
-    S3 = L - 2*(H - P)
+    R1 = 2*P - L;  S1 = 2*P - H
+    R2 = P + (H - L);  S2 = P - (H - L)
+    R3 = H + 2*(P - L); S3 = L - 2*(H - P)
     return float(P), float(R1), float(R2), float(R3), float(S1), float(S2), float(S3)
 
 def _pivots_by_scope(df: pd.DataFrame, scope: str) -> dict[str, float]:
@@ -89,7 +85,7 @@ def _pivots_by_scope(df: pd.DataFrame, scope: str) -> dict[str, float]:
         agg = d[["High","Low","Close"]].resample("W-FRI").agg({"High":"max","Low":"min","Close":"last"}).dropna()
     elif scope == "monthly":
         agg = d[["High","Low","Close"]].resample("M").agg({"High":"max","Low":"min","Close":"last"}).dropna()
-    else:  # daily
+    else:  # daily (используем предыдущий день)
         if len(d) < 2:
             px = float(d["Close"].iloc[-1])
             return {"P":px,"R1":px,"R2":px,"R3":px,"S1":px,"S2":px,"S3":px}
@@ -104,16 +100,12 @@ def _pivots_by_scope(df: pd.DataFrame, scope: str) -> dict[str, float]:
     return {"P":P,"R1":R1,"R2":R2,"R3":R3,"S1":S1,"S2":S2,"S3":S3}
 
 def compute_signal(df: pd.DataFrame, symbol: str, horizon: Horizon, params: Optional[Dict]=None) -> Signal:
-    P = DEFAULTS.copy()
-    if params:
-        P.update({k:v for k,v in params.items() if k in DEFAULTS})
+    P = DEFAULTS  # фиксированные параметры
+
     if df is None or df.empty:
         raise ValueError("empty dataframe")
 
     d = df.copy()
-    d["EMA_fast"] = _ema(d["Close"], P["ema_fast"])
-    d["EMA_mid"]  = _ema(d["Close"], P["ema_mid"])
-    d["EMA_slow"] = _ema(d["Close"], P["ema_slow"])
     d["RSI14"]    = _rsi(d["Close"], 14)
     d["ATR14"]    = _atr(d, 14)
     d["MACD_H"]   = _macd_hist(d["Close"])
@@ -125,15 +117,16 @@ def compute_signal(df: pd.DataFrame, symbol: str, horizon: Horizon, params: Opti
     body = abs(last["Close"] - last["Open"])
     weak_candle = (upper_tail / rng >= P["weak_tail_ratio"]) and (body / rng <= P["weak_body_ratio"])
 
+    # Горизонт → какие пивоты брать и чувствительность MACD
     if horizon == "short":
         pivot_scope = "daily"; need_hist = P["macd_bars_short"]
-        k_tp1, k_tp2, k_sl = P["short_tp1"], P["short_tp2"], P["short_sl"]; trend_weight = 0.6
+        k_tp1, k_tp2, k_sl = P["short_tp1"], P["short_tp2"], P["short_sl"]
     elif horizon == "position":
         pivot_scope = "monthly"; need_hist = P["macd_bars_pos"]
-        k_tp1, k_tp2, k_sl = P["pos_tp1"], P["pos_tp2"], P["pos_sl"]; trend_weight = 0.7
+        k_tp1, k_tp2, k_sl = P["pos_tp1"], P["pos_tp2"], P["pos_sl"]
     else:
         pivot_scope = "weekly"; need_hist = P["macd_bars_swing"]
-        k_tp1, k_tp2, k_sl = P["swing_tp1"], P["swing_tp2"], P["swing_sl"]; trend_weight = 0.65
+        k_tp1, k_tp2, k_sl = P["swing_tp1"], P["swing_tp2"], P["swing_sl"]
 
     x  = d.iloc[-1]
     px = float(x["Close"])
@@ -145,23 +138,34 @@ def compute_signal(df: pd.DataFrame, symbol: str, horizon: Horizon, params: Opti
     piv = _pivots_by_scope(d, pivot_scope)
     Pv, R1, R2, R3, S1, S2, S3 = piv["P"], piv["R1"], piv["R2"], piv["R3"], piv["S1"], piv["S2"], piv["S3"]
 
-    trend_pos = (x["EMA_fast"] > x["EMA_mid"] > x["EMA_slow"]) and (d["EMA_mid"].iloc[-1] > d["EMA_mid"].iloc[-5])
-    trend_neg = (x["EMA_fast"] < x["EMA_mid"] < x["EMA_slow"]) and (d["EMA_mid"].iloc[-1] < d["EMA_mid"].iloc[-5])
+    # Простая «тенденция» без MA: место цены относительно key_mark + 5-барный импульс
+    mom5 = float(d["Close"].iloc[-1] - d["Close"].iloc[-5]) if len(d) >= 6 else 0.0
+    pos_vs_key = px - km
+
     hist_seq  = _consecutive_sign(d["MACD_H"])
     macd_ok_buy, macd_ok_short = (hist_seq >= need_hist), (hist_seq <= -need_hist)
 
     rsi = float(x["RSI14"]) if pd.notna(x["RSI14"]) else 50.0
-    rsi_bias_up, rsi_bias_down = (rsi <= P["rsi_hi"]), (rsi >= P["rsi_lo"])
+    rsi_allows_buy  = (rsi <= P["rsi_hi"])   # не перегрет
+    rsi_allows_short= (rsi >= P["rsi_lo"])   # не слишком перепродан
 
-    pos_vs_key = px - km
-    buy_bias   = trend_pos and macd_ok_buy   and (pos_vs_key >= 0) and rsi_bias_up
-    short_bias = trend_neg and macd_ok_short and (pos_vs_key <= 0) and rsi_bias_down
+    # Байасы (без MA): направление = знак(pos_vs_key) + знак(mom5) + MACD серии + RSI
+    buy_bias   = (pos_vs_key >= 0) and (mom5 >= 0) and macd_ok_buy  and rsi_allows_buy
+    short_bias = (pos_vs_key <= 0) and (mom5 <= 0) and macd_ok_short and rsi_allows_short
 
-    if weak_candle and trend_neg:
+    # «Слабая свеча» усиливает шорт и ослабляет лонг
+    if weak_candle:
         short_bias = True
-    if weak_candle and trend_pos:
-        buy_bias = False
+        if buy_bias:  # конфликт — уводим в WAIT либо ослабляем
+            buy_bias = False
 
+    # confidence — мягкая функция от расстояния к key_mark и MACD-серий
+    def _conf(sign: int) -> float:
+        if atr <= 0: base = 0.5
+        else:        base = 0.5 + sign * (pos_vs_key / (3.0*atr)) + sign * (abs(hist_seq)/10.0)
+        return float(np.clip(base, 0.0, 1.0))
+
+    # Цели/стопы: используем ближайшие пивоты, если они есть, иначе ATR-профиль
     def _next_up_targets(price: float):
         levels = [lvl for lvl in [R1, R2, R3] if lvl > price]
         return levels[:2]
@@ -170,38 +174,30 @@ def compute_signal(df: pd.DataFrame, symbol: str, horizon: Horizon, params: Opti
         levels.sort(reverse=True)
         return levels[:2]
 
-    def _conf(sign: int) -> float:
-        if atr <= 0: base = 0.5
-        else:        base = 0.5 + sign * (pos_vs_key / (2.8*atr))
-        base = float(np.clip(base, 0.0, 1.0))
-        trend_part = trend_weight if (trend_pos and sign>0) or (trend_neg and sign<0) else 0.0
-        adj = -0.07 if (sign>0 and weak_candle) else (0.07 if (sign<0 and weak_candle) else 0.0)
-        return float(np.clip(0.5*base + 0.5*trend_part + adj, 0.0, 1.0))
-
     if buy_bias and atr > 0:
         action = "BUY"; confidence = _conf(+1); entry = px
-        targets = _next_up_targets(px)
-        if targets:
-            tp1 = max(targets[0], px + 0.2*atr)
-            tp2 = max(targets[1] if len(targets)>1 else targets[0] + 0.6*atr, tp1 + 0.2*atr)
+        ups = _next_up_targets(px)
+        if ups:
+            tp1 = max(ups[0], px + 0.2*atr)
+            tp2 = max(ups[1] if len(ups)>1 else ups[0] + 0.6*atr, tp1 + 0.2*atr)
         else:
             tp1, tp2 = px + k_tp1*atr, px + k_tp2*atr
         sl_cands = [lvl for lvl in [S1, S2, S3] if lvl < px]
         sl = min(sl_cands) if sl_cands else px - k_sl*atr
-        tp1, tp2 = max(tp1, px), max(tp2, tp1)
-        sl       = min(sl, px - 0.01)
+        tp1, tp2 = max(tp1, px), max(tp2, tp1); sl = min(sl, px - 0.01)
+
     elif short_bias and atr > 0:
         action = "SHORT"; confidence = _conf(-1); entry = px
-        targets = _next_down_targets(px)
-        if targets:
-            tp1 = min(targets[0], px - 0.2*atr)
-            tp2 = min(targets[1] if len(targets)>1 else targets[0] - 0.6*atr, tp1 - 0.2*atr)
+        dns = _next_down_targets(px)
+        if dns:
+            tp1 = min(dns[0], px - 0.2*atr)
+            tp2 = min(dns[1] if len(dns)>1 else dns[0] - 0.6*atr, tp1 - 0.2*atr)
         else:
             tp1, tp2 = px - k_tp1*atr, px - k_tp2*atr
         sl_cands = [lvl for lvl in [R1, R2, R3] if lvl > px]
         sl = max(sl_cands) if sl_cands else px + k_sl*atr
-        tp1, tp2 = min(tp1, px), min(tp2, tp1)
-        sl       = max(sl, px + 0.01)
+        tp1, tp2 = min(tp1, px), min(tp2, tp1); sl = max(sl, px + 0.01)
+
     else:
         action = "WAIT"
         confidence = float(np.clip(0.5 + (pos_vs_key/(4.0*atr) if atr>0 else 0.0), 0.0, 1.0))
@@ -215,3 +211,6 @@ def compute_signal(df: pd.DataFrame, symbol: str, horizon: Horizon, params: Opti
         "pivot_P": round(float(Pv),2), "R1": round(float(R1),2), "R2": round(float(R2),2), "R3": round(float(R3),2),
         "S1": round(float(S1),2), "S2": round(float(S2),2), "S3": round(float(S3),2),
     }
+
+    
+    
